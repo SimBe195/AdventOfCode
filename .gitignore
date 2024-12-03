@@ -1,0 +1,5 @@
+# Ignore all build directories recursively
+**/build/
+
+# Ignore all bin directories recursively
+**/bin/
