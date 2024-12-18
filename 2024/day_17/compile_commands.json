@@ -1,0 +1,14 @@
+[
+{
+  "directory": "/home/simon/AdventOfCode/2024/day_17/build",
+  "command": "/usr/bin/c++    -fopenmp -O3 -o CMakeFiles/day17.dir/main.cc.o -c /home/simon/AdventOfCode/2024/day_17/main.cc",
+  "file": "/home/simon/AdventOfCode/2024/day_17/main.cc",
+  "output": "CMakeFiles/day17.dir/main.cc.o"
+},
+{
+  "directory": "/home/simon/AdventOfCode/2024/day_17/build",
+  "command": "/usr/bin/c++    -fopenmp -O3 -o CMakeFiles/day17.dir/program.cc.o -c /home/simon/AdventOfCode/2024/day_17/program.cc",
+  "file": "/home/simon/AdventOfCode/2024/day_17/program.cc",
+  "output": "CMakeFiles/day17.dir/program.cc.o"
+}
+]
