@@ -2,7 +2,7 @@ use rand::Rng;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fs::read_to_string;
+use std::fs::{read_to_string, write};
 use std::rc::Rc;
 
 #[derive(Debug)]
@@ -22,6 +22,7 @@ struct LogicVariable {
 struct LogicGate {
     input1: Option<bool>,
     input2: Option<bool>,
+    operation_name: String,
     operation: Box<dyn Fn(bool, bool) -> bool>,
     output: Rc<RefCell<LogicVariable>>,
 }
@@ -62,28 +63,33 @@ impl LogicVariable {
 }
 
 impl LogicGate {
-    pub fn new<F>(operation: F, variable: Rc<RefCell<LogicVariable>>) -> Rc<RefCell<Self>>
+    pub fn new<F>(
+        operation_name: String,
+        operation: F,
+        variable: Rc<RefCell<LogicVariable>>,
+    ) -> Rc<RefCell<Self>>
     where
         F: Fn(bool, bool) -> bool + 'static,
     {
         Rc::new(RefCell::new(Self {
             input1: None,
             input2: None,
+            operation_name,
             operation: Box::new(operation),
             output: variable,
         }))
     }
 
     pub fn new_and(variable: Rc<RefCell<LogicVariable>>) -> Rc<RefCell<Self>> {
-        Self::new(|a, b| a && b, variable)
+        Self::new("AND".to_string(), |a, b| a && b, variable)
     }
 
     pub fn new_or(variable: Rc<RefCell<LogicVariable>>) -> Rc<RefCell<Self>> {
-        Self::new(|a, b| a || b, variable)
+        Self::new("OR".to_string(), |a, b| a || b, variable)
     }
 
     pub fn new_xor(variable: Rc<RefCell<LogicVariable>>) -> Rc<RefCell<Self>> {
-        Self::new(|a, b| a ^ b, variable)
+        Self::new("XOR".to_string(), |a, b| a ^ b, variable)
     }
 
     pub fn set_input(&mut self, index: usize, value: bool) -> Result<(), CircularConnectionError> {
@@ -169,6 +175,130 @@ fn parse_file(
     (variables, gates, input_variables)
 }
 
+fn dump_dot(
+    variables: &HashMap<String, Rc<RefCell<LogicVariable>>>,
+    gates: &HashMap<String, Rc<RefCell<LogicGate>>>,
+    input_variables: &HashSet<String>,
+) {
+    let mut out_str = "digraph G {\nlayout=neato;\n".to_string();
+
+    let mut x_positions: HashMap<String, u32> = HashMap::new();
+    let mut y_positions: HashMap<String, u32> = HashMap::new();
+    let mut shapes: HashMap<String, String> = HashMap::new();
+
+    let mut var_to_name_map: HashMap<*mut LogicVariable, String> = HashMap::new();
+
+    for (name, var) in variables {
+        var_to_name_map.insert(var.as_ptr(), name.clone());
+    }
+
+    for (name, var) in variables {
+        for (gate, _) in &var.borrow().user_gates {
+            out_str.push_str(
+                format!(
+                    "{} -> {};\n",
+                    name,
+                    var_to_name_map.get(&gate.borrow().output.as_ptr()).unwrap()
+                )
+                .as_str(),
+            );
+        }
+    }
+
+    for (name, gate) in gates {
+        shapes.insert(
+            name.clone(),
+            match gate.borrow().operation_name.as_str() {
+                "AND" => "triangle".to_string(),
+                "OR" => "square".to_string(),
+                "XOR" => "diamond".to_string(),
+                _ => panic!(),
+            },
+        );
+    }
+
+    for name in input_variables {
+        let pos = name[1..].parse::<u32>().unwrap();
+        shapes.insert(name.clone(), "circle".to_string());
+        if name.starts_with("x") {
+            x_positions.insert(name.to_string(), 2 * pos);
+            y_positions.insert(name.to_string(), 0);
+        } else {
+            x_positions.insert(name.to_string(), 2 * pos + 1);
+            y_positions.insert(name.to_string(), 1);
+        }
+    }
+
+    for (name, gate) in gates {
+        if name.starts_with("z") {
+            let pos = name[1..].parse::<u32>().unwrap();
+            x_positions.insert(name.to_string(), 2 * pos);
+            y_positions.insert(name.to_string(), 6);
+        } else if gate.borrow().operation_name == "XOR" {
+            y_positions.insert(name.to_string(), 3);
+        } else if gate.borrow().operation_name == "OR" {
+            y_positions.insert(name.to_string(), 5);
+        } else {
+            y_positions.insert(name.to_string(), 2);
+        }
+    }
+
+    let mut missing_gates: HashSet<&String> = gates.keys().collect();
+    for key in x_positions.keys() {
+        missing_gates.remove(key);
+    }
+
+    while !missing_gates.is_empty() {
+        let mut new_x_positions = HashMap::new();
+        for (key, pos) in &x_positions {
+            if key.starts_with("y") {
+                continue;
+            }
+            for (out_gate, _) in &variables.get(key).unwrap().borrow().user_gates {
+                let out_name = var_to_name_map
+                    .get(&out_gate.borrow().output.as_ptr())
+                    .unwrap();
+                if !x_positions.contains_key(out_name) {
+                    new_x_positions.insert(out_name.clone(), *pos);
+                }
+            }
+        }
+        for key in new_x_positions.keys() {
+            missing_gates.remove(key);
+        }
+        x_positions.extend(new_x_positions);
+    }
+
+    for name in input_variables {
+        out_str.push_str(
+            format!(
+                "{} [shape={}, pos=\"{},{}!\"];\n",
+                name,
+                shapes.get(name).unwrap(),
+                x_positions.get(name).unwrap(),
+                y_positions.get(name).unwrap()
+            )
+            .as_str(),
+        );
+    }
+
+    for name in gates.keys() {
+        out_str.push_str(
+            format!(
+                "{} [shape={}, pos=\"{},{}!\"];\n",
+                name,
+                shapes.get(name).unwrap(),
+                x_positions.get(name).unwrap(),
+                y_positions.get(name).unwrap()
+            )
+            .as_str(),
+        );
+    }
+
+    out_str.push_str("}\n");
+    write("graph.dot", out_str).unwrap();
+}
+
 fn forward_input(
     variables: &mut HashMap<String, Rc<RefCell<LogicVariable>>>,
     input_variables: &HashSet<String>,
@@ -177,14 +307,6 @@ fn forward_input(
         variables.get(var_name).unwrap().borrow_mut().propagate()?;
     }
     Ok(())
-}
-
-fn num_outputs(variables: &HashMap<String, Rc<RefCell<LogicVariable>>>) -> usize {
-    let mut idx = 0;
-    while variables.get(&format!("z{:02}", idx)).is_some() {
-        idx += 1;
-    }
-    idx
 }
 
 fn get_output_value(variables: &HashMap<String, Rc<RefCell<LogicVariable>>>) -> u64 {
@@ -216,20 +338,6 @@ fn target_sum(variables: &HashMap<String, Rc<RefCell<LogicVariable>>>) -> u64 {
     }
 
     value_x + value_y
-}
-
-fn find_first_mistake_output(target: u64, actual: u64) -> Option<usize> {
-    let mut bit_idx = 0;
-    let mut bit_value = 1;
-    while bit_value <= target || bit_value <= actual {
-        if target & bit_value != actual & bit_value {
-            return Some(bit_idx);
-        }
-        bit_idx += 1;
-        bit_value <<= 1;
-    }
-
-    None
 }
 
 fn check_gates(
@@ -277,159 +385,6 @@ fn switch_gate_outputs(
 
     gates.insert(name_1.clone(), gate_2.clone());
     gates.insert(name_2.clone(), gate_1.clone());
-}
-
-fn _find_fixing_switches_inner(
-    target: u64,
-    all_keys: &Vec<String>,
-    variables: &mut HashMap<String, Rc<RefCell<LogicVariable>>>,
-    gates: &mut HashMap<String, Rc<RefCell<LogicGate>>>,
-    input_variables: &HashSet<String>,
-    blacklist: &mut HashSet<String>,
-    min_mistake_position: usize,
-    num_switches: u32,
-) -> Option<Vec<(String, String)>> {
-    if forward_input(variables, input_variables).is_err() {
-        return None;
-    }
-
-    let mistake_position_opt = find_first_mistake_output(target, get_output_value(variables));
-
-    if mistake_position_opt.is_some_and(|x| x < min_mistake_position || num_switches == 0) {
-        return None;
-    }
-
-    if mistake_position_opt.is_none() && num_switches == 0 {
-        if check_gates(variables, input_variables, 100) {
-            let mut candidate: Vec<_> = blacklist.iter().cloned().collect();
-            candidate.sort();
-            println!("Found candidate! {:?}", candidate.join(","));
-            return Some(Vec::new());
-        }
-        return None;
-    }
-
-    if mistake_position_opt.is_none() && num_switches > 0 {
-        println!("Fixed everything with less than maximum switches. Fill up with no-op switches.");
-        for (idx, var_1) in all_keys.iter().enumerate() {
-            if blacklist.contains(var_1) {
-                continue;
-            }
-            for var_2 in all_keys.iter().skip(idx + 1) {
-                if blacklist.contains(var_2) {
-                    continue;
-                }
-                switch_gate_outputs(var_1, var_2, gates);
-                blacklist.insert(var_1.clone());
-                blacklist.insert(var_2.clone());
-                let partial_result = _find_fixing_switches_inner(
-                    target,
-                    all_keys,
-                    variables,
-                    gates,
-                    input_variables,
-                    blacklist,
-                    num_outputs(variables) + 1,
-                    num_switches - 1,
-                );
-                blacklist.remove(var_1);
-                blacklist.remove(var_2);
-                switch_gate_outputs(var_1, var_2, gates);
-                if let Some(mut fix) = partial_result {
-                    fix.push((var_1.to_string(), var_2.to_string()));
-                    return Some(fix);
-                }
-            }
-        }
-    }
-
-    let mistake_position = mistake_position_opt.unwrap();
-
-    let mut switch_quality = HashMap::new();
-    for (idx, var_1) in all_keys.iter().enumerate() {
-        if blacklist.contains(var_1) {
-            continue;
-        }
-        for var_2 in all_keys.iter().skip(idx + 1) {
-            if blacklist.contains(var_2) {
-                continue;
-            }
-            switch_gate_outputs(&var_1, &var_2, gates);
-            if forward_input(variables, input_variables).is_ok() {
-                let new_mistake_position =
-                    match find_first_mistake_output(target, get_output_value(variables)) {
-                        Some(pos) => pos,
-                        None => num_outputs(variables) + 1,
-                    };
-                if new_mistake_position > mistake_position {
-                    switch_quality
-                        .insert((var_1.to_string(), var_2.to_string()), new_mistake_position);
-                }
-            }
-            switch_gate_outputs(&var_1, &var_2, gates);
-        }
-    }
-
-    while !switch_quality.is_empty() {
-        let ((var_1, var_2), mistake_pos) = switch_quality.iter().max_by_key(|x| x.1).unwrap();
-        if num_switches > 1 {
-            println!(
-                "Investigate switch {} <-> {} leading to mistake pos {} with {} switches remaining.",
-                var_1,
-                var_2,
-                mistake_pos,
-                num_switches - 1,
-            );
-        }
-        switch_gate_outputs(&var_1, &var_2, gates);
-        blacklist.insert(var_1.clone());
-        blacklist.insert(var_2.clone());
-        let partial_result = _find_fixing_switches_inner(
-            target,
-            all_keys,
-            variables,
-            gates,
-            input_variables,
-            blacklist,
-            *mistake_pos,
-            num_switches - 1,
-        );
-        blacklist.remove(var_1);
-        blacklist.remove(var_2);
-        switch_gate_outputs(&var_1, &var_2, gates);
-
-        if let Some(mut fix) = partial_result {
-            fix.push((var_1.to_string(), var_2.to_string()));
-            return Some(fix);
-        }
-
-        switch_quality.remove(&(var_1.clone(), var_2.clone()));
-    }
-
-    None
-}
-
-fn find_fixing_switches(
-    variables: &mut HashMap<String, Rc<RefCell<LogicVariable>>>,
-    gates: &mut HashMap<String, Rc<RefCell<LogicGate>>>,
-    input_variables: &HashSet<String>,
-    num_switches: u32,
-) -> Option<Vec<(String, String)>> {
-    let all_keys: Vec<String> = variables
-        .keys()
-        .filter(|k| !input_variables.contains(*k))
-        .cloned()
-        .collect();
-    _find_fixing_switches_inner(
-        target_sum(variables),
-        &all_keys,
-        variables,
-        gates,
-        input_variables,
-        &mut HashSet::new(),
-        0,
-        num_switches,
-    )
 }
 
 fn flatten_switches(switches: &Vec<(String, String)>) -> Vec<String> {
@@ -489,26 +444,6 @@ mod test {
     }
 
     #[test]
-    fn test_mistake() {
-        let (mut variables, _, input_variables) = parse_file("testinput.txt");
-        forward_input(&mut variables, &input_variables).unwrap();
-        assert_eq!(
-            find_first_mistake_output(target_sum(&variables), get_output_value(&variables)),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn test_mistake_2() {
-        let (mut variables, _, input_variables) = parse_file("testinput2.txt");
-        forward_input(&mut variables, &input_variables).unwrap();
-        assert_eq!(
-            find_first_mistake_output(target_sum(&variables), get_output_value(&variables)),
-            Some(2)
-        );
-    }
-
-    #[test]
     fn test_switch() {
         let (mut variables, mut gates, input_variables) = parse_file("testinput.txt");
         switch_gate_outputs(&String::from("z01"), &String::from("z02"), &mut gates);
@@ -537,16 +472,17 @@ fn main() {
     forward_input(&mut variables, &input_variables).unwrap();
     println!("Challenge 1: {}", get_output_value(&variables));
 
-    if forward_input(&mut variables, &input_variables).is_ok() {
-        println!(
-            "Initial mistake position: {}",
-            &find_first_mistake_output(target_sum(&variables), get_output_value(&variables))
-                .unwrap_or(0)
-        );
+    let switches = vec![
+        ("vcf".to_string(), "z10".to_string()),
+        ("z17".to_string(), "fhg".to_string()),
+        ("z39".to_string(), "tnc".to_string()),
+        ("fsq".to_string(), "dvb".to_string()),
+    ];
+    for (left, right) in &switches {
+        switch_gate_outputs(left, right, &mut gates);
     }
-    let switches =
-        find_fixing_switches(&mut variables, &mut gates, &input_variables, 4).unwrap_or_default();
-    dbg!(&switches);
-
-    println!("Challenge 2: {}", flatten_switches(&switches).join(","));
+    if check_gates(&mut variables, &input_variables, 100) {
+        dump_dot(&variables, &gates, &input_variables);
+        println!("Challenge 2: {}", (flatten_switches(&switches)).join(","));
+    }
 }
